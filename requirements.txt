@@ -1,2 +1,4 @@
 # common-code[test] @ git+https://github.com/swiss-ai-center/common-code.git@main
-guardrails-ai==0.6.6
+torch
+transformers
+vllm

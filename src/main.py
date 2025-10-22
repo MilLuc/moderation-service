@@ -1,7 +1,14 @@
 import asyncio
+import json
+import math
+import os
+import re
 import time
 from contextlib import asynccontextmanager
 
+import torch
+
+# Imports required by the service's model
 from common_code.common.enums import (
     ExecutionUnitTagAcronym,
     ExecutionUnitTagName,
@@ -22,13 +29,92 @@ from common_code.tasks.service import TasksService
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
-from guardrails import Guard
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
 
-# Imports required by the service's model
-from guardrails.hub import ProfanityFree
+from models import ModerationInput, ModerationResult, Risk
+
+INPUT_KEY = "input"
+RESULT_KEY = "result"
+RISK_NAME_KEY = "risk_name"
 
 settings = get_settings()
-guard = Guard().use(ProfanityFree, on_fail="noop")
+
+os.environ["VLLM_LOGGING_LEVEL"] = "ERROR"
+
+model_path_name = "ibm-granite/granite-guardian-3.2-5b"
+
+safe_token = "No"
+risky_token = "Yes"
+nlogprobs = 20
+
+tokenizer = AutoTokenizer.from_pretrained(model_path_name)
+
+sampling_params = SamplingParams(temperature=0.0, logprobs=nlogprobs)
+model = LLM(model=model_path_name, tensor_parallel_size=1)
+
+
+def get_probabilities(logprobs):
+    safe_token_prob = 1e-50
+    risky_token_prob = 1e-50
+    for gen_token_i in logprobs:
+        for token_prob in gen_token_i.values():
+            decoded_token = token_prob.decoded_token
+            if decoded_token.strip().lower() == safe_token.lower():
+                safe_token_prob += math.exp(token_prob.logprob)
+            if decoded_token.strip().lower() == risky_token.lower():
+                risky_token_prob += math.exp(token_prob.logprob)
+
+    probabilities = torch.softmax(
+        torch.tensor([math.log(safe_token_prob), math.log(risky_token_prob)]), dim=0
+    )
+
+    return probabilities
+
+
+def parse_output(output):
+    label, prob_of_risk = None, None
+
+    if nlogprobs > 0:
+        logprobs = next(iter(output.outputs)).logprobs
+        if logprobs is not None:
+            prob = get_probabilities(logprobs)
+            prob_of_risk = prob[1]
+
+    output = next(iter(output.outputs)).text.strip()
+    res = re.search(r"^\w+", output, re.MULTILINE).group(0).strip()
+    if risky_token.lower() == res.lower():
+        label = risky_token
+    elif safe_token.lower() == res.lower():
+        label = safe_token
+    else:
+        label = "Failed"
+
+    confidence_level = (
+        re.search(r"<confidence> (.*?) </confidence>", output).group(1).strip()
+    )
+
+    return label, confidence_level, prob_of_risk.item()
+
+
+def detect_risk(risk: Risk, messages):
+    guardian_config = {RISK_NAME_KEY: risk}
+    chat = tokenizer.apply_chat_template(
+        messages,
+        guardian_config=guardian_config,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    output = model.generate(chat, sampling_params, use_tqdm=False)
+    predicted_label = output[0].outputs[0].text.strip()
+
+    label, confidence, prob = parse_output(predicted_label)
+    return ModerationResult(
+        risk_name=risk,
+        detected=label == risky_token,
+        confidence=confidence,
+        probability=prob,
+    )
 
 
 class MyService(Service):
@@ -50,15 +136,15 @@ class MyService(Service):
             status=ServiceStatus.AVAILABLE,
             data_in_fields=[
                 FieldDescription(
-                    name="prompt",
+                    name=INPUT_KEY,
                     type=[
-                        FieldDescriptionType.TEXT_PLAIN,
+                        FieldDescriptionType.APPLICATION_JSON,
                     ],
                 ),
             ],
             data_out_fields=[
                 FieldDescription(
-                    name="result", type=[FieldDescriptionType.APPLICATION_JSON]
+                    name=RESULT_KEY, type=[FieldDescriptionType.APPLICATION_JSON]
                 ),
             ],
             tags=[
@@ -73,13 +159,14 @@ class MyService(Service):
         self._logger = get_logger(settings)
 
     def process(self, data):
-        res = guard.validate(data["prompt"].data)
-        print(res)
-        res.json()
+        input = ModerationInput(**data[INPUT_KEY])
+        messages = input.to_messages()
+        result = []
+        for risk in input.risks_to_detect:
+            result.append[detect_risk(risk, messages)]
         return {
-            "result": TaskData(
-                data=res.json(),
-                type=FieldDescriptionType.APPLICATION_JSON,
+            RESULT_KEY: TaskData(
+                data=json.dump(result), type=FieldDescriptionType.APPLICATION_JSON
             )
         }
 
