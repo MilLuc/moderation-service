@@ -16,6 +16,10 @@ services:
         source .venv/bin/activate &&
         # Install the dependencies
         pip install -r requirements.txt -r requirements-all.txt &&
+        # Configure GuardRails AI
+        guardrails configure --disable-metrics --token $(cat .api) --disable-remote-inferencing --clear-token &&
+        # Install Guards
+        guardrails hub install hub://guardrails/profanity_free &&
         # Run the service
         cd src &&
         uvicorn --reload --host 0.0.0.0 --port 9090 main:app

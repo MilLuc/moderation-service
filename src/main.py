@@ -1,33 +1,39 @@
 import asyncio
 import time
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from contextlib import asynccontextmanager
+
+from common_code.common.enums import (
+    ExecutionUnitTagAcronym,
+    ExecutionUnitTagName,
+    FieldDescriptionType,
+)
+from common_code.common.models import ExecutionUnitTag, FieldDescription
 from common_code.config import get_settings
 from common_code.http_client import HttpClient
-from common_code.logger.logger import get_logger, Logger
+from common_code.logger.logger import Logger, get_logger
 from common_code.service.controller import router as service_router
+from common_code.service.enums import ServiceStatus
+from common_code.service.models import Service
 from common_code.service.service import ServiceService
 from common_code.storage.service import StorageService
 from common_code.tasks.controller import router as tasks_router
-from common_code.tasks.service import TasksService
 from common_code.tasks.models import TaskData
-from common_code.service.models import Service
-from common_code.service.enums import ServiceStatus
-from common_code.common.enums import FieldDescriptionType, ExecutionUnitTagName, ExecutionUnitTagAcronym
-from common_code.common.models import FieldDescription, ExecutionUnitTag
-from contextlib import asynccontextmanager
+from common_code.tasks.service import TasksService
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from guardrails import Guard
 
 # Imports required by the service's model
-# TODO: 1. ADD REQUIRED IMPORTS (ALSO IN THE REQUIREMENTS.TXT)
+from guardrails.hub import ProfanityFree
 
 settings = get_settings()
+guard = Guard().use(ProfanityFree, on_fail="noop")
 
 
 class MyService(Service):
-    # TODO: 2. CHANGE THIS DESCRIPTION
     """
-    My service model
+    Moderation service
     """
 
     # Any additional fields must be excluded for Pydantic to work
@@ -36,20 +42,17 @@ class MyService(Service):
 
     def __init__(self):
         super().__init__(
-            # TODO: 3. CHANGE THE SERVICE NAME AND SLUG
-            name="My Service",
-            slug="my-service",
+            name="Moderation Service",
+            slug="moderation-service",
             url=settings.service_url,
             summary=api_summary,
             description=api_description,
             status=ServiceStatus.AVAILABLE,
-            # TODO: 4. CHANGE THE INPUT AND OUTPUT FIELDS, THE TAGS AND THE HAS_AI VARIABLE
             data_in_fields=[
                 FieldDescription(
-                    name="image",
+                    name="prompt",
                     type=[
-                        FieldDescriptionType.IMAGE_PNG,
-                        FieldDescriptionType.IMAGE_JPEG,
+                        FieldDescriptionType.TEXT_PLAIN,
                     ],
                 ),
             ],
@@ -60,28 +63,24 @@ class MyService(Service):
             ],
             tags=[
                 ExecutionUnitTag(
-                    name=ExecutionUnitTagName.IMAGE_PROCESSING,
-                    acronym=ExecutionUnitTagAcronym.IMAGE_PROCESSING,
+                    name=ExecutionUnitTagName.GENERIC,
+                    acronym=ExecutionUnitTagAcronym.GENERIC,
                 ),
             ],
-            has_ai=False,
-            # OPTIONAL: CHANGE THE DOCS URL TO YOUR SERVICE'S DOCS
+            has_ai=True,
             docs_url="https://docs.swiss-ai-center.ch/reference/core-concepts/service/",
         )
         self._logger = get_logger(settings)
 
-    # TODO: 5. CHANGE THE PROCESS METHOD (CORE OF THE SERVICE)
     def process(self, data):
-        # NOTE that the data is a dictionary with the keys being the field names set in the data_in_fields
-        # The objects in the data variable are always bytes. It is necessary to convert them to the desired type
-        # before using them.
-        # raw = data["image"].data
-        # input_type = data["image"].type
-        # ... do something with the raw data
-
-        # NOTE that the result must be a dictionary with the keys being the field names set in the data_out_fields
+        res = guard.validate(data["prompt"].data)
+        print(res)
+        res.json()
         return {
-            "result": TaskData(data=..., type=FieldDescriptionType.APPLICATION_JSON)
+            "result": TaskData(
+                data=res.json(),
+                type=FieldDescriptionType.APPLICATION_JSON,
+            )
         }
 
 
@@ -115,7 +114,9 @@ async def lifespan(app: FastAPI):
         for engine_url in settings.engine_urls:
             announced = False
             while not announced and retries > 0:
-                announced = await service_service.announce_service(my_service, engine_url)
+                announced = await service_service.announce_service(
+                    my_service, engine_url
+                )
                 retries -= 1
                 if not announced:
                     time.sleep(settings.engine_announce_retry_delay)
@@ -135,12 +136,11 @@ async def lifespan(app: FastAPI):
         await service_service.graceful_shutdown(my_service, engine_url)
 
 
-# TODO: 6. CHANGE THE API DESCRIPTION AND SUMMARY
-api_description = """My service
-bla bla bla...
+api_description = """
+This Service validates the given prompt based on various guards
 """
-api_summary = """My service
-bla bla bla...
+api_summary = """
+A
 """
 
 # Define the FastAPI application with information
